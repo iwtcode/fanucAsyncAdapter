@@ -1,0 +1,16 @@
+*.test
+*.log
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+go.work
+go.work.sum
+.idea/
+.vscode/
+*.txt
+*.py
+*.zip
+*.rar
+fetch/
+logs/
