@@ -1,63 +1,122 @@
 # fanucAsyncAdapter
 
-Go-библиотека (и консольная утилита) для чтения данных с ЧПУ FANUC / эмулятора
-**FANUC CNC GUIDE** по FOCAS2 Ethernet. Cgo не нужен — `Fwlib64.dll` загружается через `syscall`,
-поэтому работает только в Windows.
+Два Go-пакета и две утилиты для чтения данных с ЧПУ FANUC / эмулятора **FANUC CNC GUIDE**.
+Только Windows (64-бит).
 
-## Использование как библиотеки
+| Пакет       | Утилита        | Что делает                                                        |
+|-------------|----------------|-------------------------------------------------------------------|
+| `focas`     | `cmd/focas`     | Читает ЧПУ напрямую по FOCAS2 Ethernet через `Fwlib64.dll`        |
+| `mtconnect` | `cmd/mtconnect` | Поднимает fanuc-driver + MTConnect agent и читает их состояние   |
+
+## focas
+
+Cgo не нужен — `Fwlib64.dll` загружается через `syscall`. Рядом с ней должна лежать `Fwlibe64.dll`
+(поиск — рядом с exe и вверх от текущего каталога, либо `Config.DLLPath`).
 
 ```go
-import "fanucAsyncAdapter/fanuc"
+import "fanucAsyncAdapter/focas"
 
-c, err := fanuc.Connect(fanuc.Config{IP: "127.0.0.1", Port: 8193})
+c, err := focas.Connect(focas.Config{IP: "127.0.0.1", Port: 8193})
 if err != nil { log.Fatal(err) }
 defer c.Close()
 
-info, _ := c.ProgramInfo()    // режим, состояние, имя/номер программы, N, текущий кадр
-axes, _ := c.Axes()           // X, Y, Z…: abs / machine / relative / distance-to-go
-prog, _ := c.RunningProgram() // ПОЛНЫЙ текст главной выполняемой программы
-other, _ := c.Program(1234)   // или любой другой программы по номеру
+st, _ := c.State() // всё состояние одним снимком: статус, программа, оси, шпиндели
+st.Write(os.Stdout)
+
+c.Watch(ctx, time.Second, func(st *focas.State) error { // опрос
+    st.Write(os.Stdout)
+    return nil
+})
+
+prog, _ := c.Program(0) // текст управляющей программы — отдельный запрос (0 — выполняемая, или номер)
 ```
 
-`Client` потокобезопасен. Внутри два соединения, у каждого своя горутина, закреплённая за потоком ОС:
-быстрое (статус, информация, оси) и «тяжёлое» (выгрузка текста программы). Поэтому опрос
-статуса и осей не ждёт, пока докачивается большая программа.
+Отдельные части: `Status()`, `ProgramInfo()`, `Axes()`, `Spindles()`.
 
-Текст программы кэшируется (`Config.ProgramCacheTTL`, по умолчанию 30 с): первый запрос идёт в ЧПУ,
-повторные — мгновенные. `ReloadProgram(n)` читает из ЧПУ принудительно.
+- **Опрос** (`State`, `Watch`) текст программы не читает: он быстрый и не зависит от размера программы.
+- **Программа** (`Program`) выгружается секунды (на эмуляторе ≈4 КБ/с). Один `Client` — одно соединение,
+  поэтому пока идёт выгрузка, его остальные запросы ждут. Если опрос не должен простаивать,
+  откройте для программы второй `Client`.
+- Части состояния, которые ЧПУ не поддерживает, не обрывают чтение: причина попадает в `State.Warnings`.
+- При потере соединения `Client` один раз переподключается и повторяет запрос.
+- Все вызовы FOCAS идут из одной горутины, закреплённой за потоком ОС (иначе DLL отвечает `EW_HANDLE`).
 
-Номер главной программы, уже полученный через `ProgramInfo()`, переиспользуется `RunningProgram()`
-`Config.MainNumberTTL` (по умолчанию 2 с) — лишний `cnc_rdprgnum` не вызывается. Параллельные запросы
-одной и той же программы ждут одну выгрузку (даже при выключенном кэше), а оба соединения
-открываются параллельно прямо в `Connect`.
-
-## Утилита
+### Утилита
 
 ```bash
-go build -o fanucadapter.exe ./cmd/fanucadapter
+go build -o focas.exe ./cmd/focas
 
-./fanucadapter.exe                                  # всё: информация + оси + программа целиком
-./fanucadapter.exe -programlog out.log              # текст программы пишется в файл (по умолчанию УП.log), в консоль — только строка-итог
-./fanucadapter.exe -programlog ""                   # выводить текст программы в консоль
-./fanucadapter.exe -program=false                   # без текста программы (самый быстрый вариант)
-./fanucadapter.exe -axes=false                      # без осей
-./fanucadapter.exe -prognum 1234                    # текст конкретной программы
-./fanucadapter.exe -interval 500                    # опрос раз в 0,5 с (текст программы — один раз), Ctrl+C — выход
-./fanucadapter.exe -interval 500 -refresh           # + перечитывать программу из ЧПУ каждый раз
-./fanucadapter.exe -upload 256 -trace               # выгрузка через cnc_upload (256 Б); -upload 4 — только cnc_upload4; по умолчанию auto
-./fanucadapter.exe -trace                           # время этапов и сводка по вызовам FOCAS
-./fanucadapter.exe -ip 192.168.56.1 -port 8193 -dll ./Fwlib64.dll -lookahead
+./focas.exe                              # опрос раз в секунду, Ctrl+C — выход
+./focas.exe -interval 0                  # прочитать один раз
+./focas.exe -interval 200ms              # чаще
+./focas.exe -ip 192.168.56.1 -port 8193  # ЧПУ на другом адресе
+./focas.exe -program 0                   # вместо опроса: текст выполняемой программы в консоль
+./focas.exe -program 1234 -out 1234.txt  # программа O1234 — в файл
 ```
 
-## Тесты
+### Тесты
 
-Нужен запущенный эмулятор с включённым FOCAS Ethernet; если подключиться нельзя — тесты пропускаются.
+Нужен запущенный эмулятор с включённым FOCAS Ethernet; без него тесты пропускаются.
+Тесты идут по очереди через одно соединение и ничего не имитируют: всё читается с настоящего ЧПУ.
 
 ```bash
-go test -count=1 -v ./fanuc/          # полный прогон: программа выгружается целиком (≈8 с)
-go test -count=1 -short -v ./fanuc/   # быстрый: только начало программы (≈1 с)
+go test -count=1 -v ./focas/          # всё, включая выгрузку программы (≈8 с, текст — в focas/УП.log)
+go test -count=1 -v -short ./focas/   # без выгрузки программы
 ```
 
-Эмулятор выгружает программы строго по очереди и со скоростью ≈4 КБ/с независимо от числа
-соединений и размера порции, поэтому быстрее всего — читать меньше (`Client.ProgramHead`)
-или не читать повторно (кэш).
+Проверяются: статус, сведения о программе, оси, шпиндели, агрегат `State` (согласован с отдельными запросами),
+`Watch` и выгрузка программы. Адрес и DLL — `FOCAS_IP`, `FOCAS_PORT`, `FOCAS_DLL`.
+
+## mtconnect
+
+Сам поднимает цепочку `ЧПУ/эмулятор (FOCAS :8193) → fanuc-driver (SHDR :7878) → MTConnect agent (HTTP :5000)`
+и отдаёт **всё состояние станка** — по одному значению на каждый DataItem из модели устройства. Чистый Go,
+от пакета `focas` не зависит.
+
+### Как библиотека
+
+```go
+import "fanucAsyncAdapter/mtconnect"
+
+a, err := mtconnect.Start(ctx, mtconnect.Config{Root: ".", CNC: "127.0.0.1:8193"})
+if err != nil { log.Fatal(err) }
+defer a.Stop()
+
+st, _ := a.Current(ctx)                  // всё состояние: []Item с путём компонента, типом, единицами, значением
+mode, _ := st.Get("f_sim_p1_ctl_mode")   // или одно значение по id DataItem
+probe, _ := a.Probe(ctx)                 // описание устройства: компоненты → DataItem
+smp, _ := a.Sample(ctx, 0, 100)          // серия наблюдений из буфера агента
+
+a.Watch(ctx, time.Second, func(s *mtconnect.State) error { // опрос
+    s.Write(os.Stdout)
+    return nil
+})
+```
+
+Агент уже запущен — достаточно клиента без запуска процессов: `mtconnect.New("http://127.0.0.1:5000", "f_sim")`.
+`a.Done()` сообщает, если драйвер или агент упали сами.
+
+### Утилита
+
+```bash
+go build -o mtconnect.exe ./cmd/mtconnect
+
+./mtconnect.exe                          # запуск + всё состояние раз в секунду, Ctrl+C — выход
+./mtconnect.exe -interval 0              # прочитать один раз
+./mtconnect.exe -changes                 # после первого снимка — только изменения
+./mtconnect.exe -cnc 192.168.56.1:8193   # ЧПУ на другом адресе
+./mtconnect.exe -url http://host:5000    # агент уже запущен: только читать
+./mtconnect.exe -v                       # + вывод fanuc.exe/agent.exe в консоль (иначе — только в logs/*.log)
+```
+
+Что именно доступно, определяют коллекторы драйвера в `fanuc-driver/user/config.machines.yml`
+(машина `f_sim_mtc_long`): клиент показывает всё, что агент отдаёт по `/current`.
+
+### Тест
+
+Один интеграционный тест на настоящих драйвере и агенте: запуск, `/probe`, `/current`, `/sample`.
+Нужен запущенный эмулятор ЧПУ; без него тест пропускается.
+
+```bash
+go test -count=1 -v ./mtconnect/     # корень проекта ищется вверх от папки пакета или MTCONNECT_ROOT
+```

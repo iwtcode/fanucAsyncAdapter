@@ -13,4 +13,4 @@ go.work.sum
 *.zip
 *.rar
 fetch/
-logs/
+agent-2.8.0.3-win64/

@@ -1,0 +1,417 @@
+##
+## runtime configuration section
+##
+machines:
+  ## SHORT VERSION
+  ## each machine must have a unique 'id' value
+  ## each machine must consist of the following references:
+  ##  base: driver configuration
+  ##    *machine-base
+  ##  disabled override: (optional) set machine inactive
+  ##    *machine-disabled
+  ##  source: where to get data
+  ##    -- user defined reference
+  ##  collector: what data to collect
+  ##    -- user defined reference
+  ##  target: where to send data
+  ##    -- user defined reference
+  ##  filter: how to filter data
+  ##    *change-filter - send only when data changes
+  ##    *no-filter - send all data, regardless of change
+
+  #- id: example-null
+  #  <<: *machine-base
+  #  <<: *machine-disabled
+  #  <<: *source-1
+  #  <<: *collector-1
+  #  <<: *target-null
+  #  <<: *change-filter
+
+  #- id: example-mqtt
+  ## base fanuc configuration
+  #  <<: *machine-base
+  ## omit this machine setup from runtime, remove to make active
+  #  <<: *machine-disabled
+  ## where to get data
+  #  <<: *source-1
+  ## what data to get and how to transform data
+  #  <<: *collector-1
+  ## where to send data
+  #  <<: *target-mqtt-1
+  ## data filter
+  #  <<: *change-filter
+
+  #- id: example-influx
+  #  <<: *machine-base
+  #  <<: *machine-disabled
+  #  <<: *source-1
+  #  <<: *collector-1
+  #  <<: *target-influx-1
+  #  <<: *change-filter
+
+  #- id: example-spb
+  #  <<: *machine-base
+  #  <<: *machine-disabled
+  #  <<: *source-1
+  #  <<: *collector-1
+  #  <<: *target-spb-1
+  #  <<: *change-filter
+
+  #- id: f_sim_mtc_short
+  #  <<: *machine-base
+  #  <<: *machine-disabled
+  #  <<: *source-1
+  #  <<: *collector-1
+  #  <<: *target-shdr-1
+  #  <<: *no-filter
+  
+  ## LONG VERSION
+
+  ##
+  ## mqtt example
+  ##
+  - id: f_sim_mqtt_long
+    ## enabled: enable or disable collection for this machine
+    enabled: !!bool false
+    ## type: machine type
+    type: l99.driver.fanuc.FanucMachine, fanuc
+    ## strategy: strategy type
+    strategy: l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc
+    ## handler: handler type
+    handler: l99.driver.fanuc.handlers.FanucOne, fanuc
+    ## transport: transport type
+    transport: l99.driver.fanuc.transports.MQTT, fanuc
+    ##
+    ## machine instance attributes
+    ##
+    l99.driver.fanuc.FanucMachine, fanuc:
+      ## sweep_ms: the interval at which machine is polled
+      sweep_ms: !!int 1000
+      net:
+        ## ip: machine network address
+        ip: 192.168.111.12
+        ## port: focas port
+        port: !!int 8193
+        ## timeout_s: focas api timeout, must be above zero
+        timeout_s: !!int 3
+    ##
+    ## strategy instance attributes
+    ##
+    l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc:
+      ## stay_connected: connect and disconnect every polling interval
+      ##   this is helpful when collecting a lot of data to reduce the time we spend talking to the NC
+      stay_connected: !!bool true
+      ## exclusions: exclude paths, axes, and spindles from collection
+      #exclusions:
+      ## exclude path data only, but still collect axis and spindle data for this path
+      #  1: 
+      ## exlude axis X and spindle S data by name
+      #  2: [ X, S ]
+      ## exclude path data and all axes and spindles 
+      #  3: [ % ]
+      ## collectors: list of data collected by category
+      collectors:
+      - l99.driver.fanuc.collectors.MachineInfo, fanuc
+      - l99.driver.fanuc.collectors.Alarms, fanuc
+      - l99.driver.fanuc.collectors.Messages, fanuc
+      - l99.driver.fanuc.collectors.StateData, fanuc
+      - l99.driver.fanuc.collectors.ToolData, fanuc
+      - l99.driver.fanuc.collectors.ProductionData, fanuc
+      - l99.driver.fanuc.collectors.ProductionDataExternalSubprogramDetails, fanuc
+      - l99.driver.fanuc.collectors.GCodeData, fanuc
+      - l99.driver.fanuc.collectors.AxisData, fanuc
+      - l99.driver.fanuc.collectors.SpindleData, fanuc
+      - l99.driver.fanuc.collectors.Macro, fanuc
+      - l99.driver.fanuc.collectors.Pmc, fanuc
+
+    ##
+    ## handler instance attributes
+    ##
+    l99.driver.fanuc.handlers.FanucOne, fanuc:
+      ## iso8601: format date instead of milliseconds since 1970
+      iso8601: !!bool false
+      ## change_only: send data only when it changes
+      change_only: !!bool true
+      ## skip_interval: send internal data, useful for troubleshooting
+      skip_internal: !!bool true
+    ##
+    ## transport instance attributes
+    ##
+    l99.driver.fanuc.transports.MQTT, fanuc:
+      ## publish_model: send JSON model
+      publish_model: !!bool false
+      topic: fanuc/{{machine.Id}}/{{veneer.Name}}{{if veneer.SliceKey}}/{{veneer.SliceKey}}{{end}}
+      net:
+        ## type: mqtt connection type, tcp or ws
+        type: tcp
+        ## ip: broker network address
+        ip: 127.0.0.1
+        ## port: broker port
+        port: !!int 1883
+      ## anonymous: connect with or without credentials
+      anonymous: !!bool true
+      ## user: username to use when anonymous is false
+      user: 
+      ## password: password to use when anonymous is false
+      password: 
+    ##
+    ## alarm collector instance attributes
+    ##
+    l99.driver.fanuc.collectors.Alarms, fanuc:
+      ## stateful: alarm list behavior
+      ##   false: alarms are removed from list once cleared
+      ##   true: alarms remain in list once cleared with additional properties
+      stateful: !!bool true
+    ##
+    ## operator messages collector instance attributes
+    ##
+    l99.driver.fanuc.collectors.Messages, fanuc:
+      ## stateful: message list behavior
+      ##   false: messages are removed from list once cleared
+      ##   true: messages remain in list once cleared with additional properties
+      stateful: !!bool true
+    ##
+    ## production data instance attributes
+    ##
+    l99.driver.fanuc.collectors.ProductionData, fanuc:
+      ## unsupported: collection of data supported by a subset of NC models
+      unsupported: !!bool false
+    ##
+    ## g-code data instance attributes
+    ##
+    l99.driver.fanuc.collectors.GCodeData, fanuc:
+      ## block_counter: rely on NC provided block count (not supported by all NC models)
+      block_counter: !!bool false
+      ## buffer_length: number of characters to read-ahead from exeuting program
+      buffer_length: !!int 512
+    ##
+    ## custom production data instance attributes
+    ##
+    l99.driver.fanuc.collectors.ProductionDataExternalSubprogramDetails, fanuc:
+      extraction:
+        files:
+          1: "c:/partprg/one"
+          1400: "c:/partprg/MCenter"
+          1401: "c:/partprg/PLeft"
+          1402: "c:/partprg/PRight"
+        lines: 
+          count: !!int 60
+          show: !!bool false
+          keep: !!bool false
+        properties:
+          keep: !!bool true
+          map:
+            program_name: "^\\( *(?<key>PROGRAM NAME) *: *(?<value>[^\\):\\n]+[^ \\):\\n])* *\\)$"
+            feed: "^\\( *(?<key>FEED) *: *(?<value>[^\\):\\n]+[^ \\):\\n])* *\\)$"
+            time_per_program: "^\\( *(?<key>TIME/PROGRAM) *: *(?<value>[^\\):\\n]+[^ \\):\\n])* *\\)$"
+            kits_per_program: "^\\( *(?<key>KITS/PROGRAM) *: *(?<value>[^\\):\\n]+[^ \\):\\n])* *\\)$"
+            comments: "^\\( *(?<key>COMMENTS) *: *(?<value>[^\\):\\n]+[^ \\):\\n])* *\\)$"
+    ##
+    ## macro data
+    ##
+    l99.driver.fanuc.collectors.Macro, fanuc:
+      map:
+        - id: test
+          path: 1
+          address: !!int 100
+        - id: remaining_bar_length
+          path: 1
+          address: !!int 730
+        - id: new_bar_length
+          path: 1
+          address: !!int 731
+        - id: path_length
+          path: 1
+          address: !!int 720
+        - id: faceoff_length
+          path: [1, 2]
+          address: !!int 723
+        - id: ejector_length
+          path:
+          address: !!int 718
+    ##
+    ## pmc data
+    ##
+    l99.driver.fanuc.collectors.Pmc, fanuc:
+      map:
+        #- id: parts_good_counter
+        #  address: D4987
+        #  type: float64
+        - id: last_cycle_time
+          address: R0050
+          type: word
+        - id: run_status_byte
+          address: D0016
+          type: float32
+        - id: run_status_running_tracking
+          address: D0000.0
+          type: bit
+        - id: run_status_running_no_part
+          address: D0000.1
+          type: bit
+        - id: run_status_idle_pending
+          address: D4933.2
+          type: bit
+        - id: run_status_idle
+          address: D4933.3
+          type: bit
+        - id: run_status_faulted
+          address: D4933.4
+          type: bit
+        - id: run_status_starved
+          address: D4933.5
+          type: bit
+        - id: parts_loaded_counter
+          address: D4068
+          type: long
+        - id: parts_bad_counter
+          address: D4991
+          type: long
+        - id: parts_unloaded_counter
+          address: D4995
+          type: long
+
+  ##
+  ## mtconnect example
+  ##
+  - id: f_sim_mtc_long
+    enabled: !!bool true
+    type: l99.driver.fanuc.FanucMachine, fanuc
+    strategy: l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc
+    handler: l99.driver.fanuc.handlers.FanucOne, fanuc
+    transport: l99.driver.fanuc.transports.SHDR, fanuc
+    l99.driver.fanuc.FanucMachine, fanuc:
+      sweep_ms: !!int 1000
+      net:
+        ip: 127.0.0.1
+        port: !!int 8193
+        timeout_s: !!int 3
+    l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc:
+      stay_connected: !!bool true
+      #exclusions:
+      #  1: 
+      #  2: [ X, S ]
+      #  3: [ % ]
+      collectors:
+      - l99.driver.fanuc.collectors.MachineInfo, fanuc
+      - l99.driver.fanuc.collectors.Alarms, fanuc
+      - l99.driver.fanuc.collectors.Messages, fanuc
+      - l99.driver.fanuc.collectors.StateData, fanuc
+      - l99.driver.fanuc.collectors.ToolData, fanuc
+      - l99.driver.fanuc.collectors.ProductionData, fanuc
+      - l99.driver.fanuc.collectors.GCodeData, fanuc
+      - l99.driver.fanuc.collectors.AxisData, fanuc
+      - l99.driver.fanuc.collectors.SpindleData, fanuc
+      - l99.driver.fanuc.collectors.Macro, fanuc
+      - l99.driver.fanuc.collectors.Pmc, fanuc
+    l99.driver.fanuc.handlers.FanucOne, fanuc:
+      iso8601: !!bool true
+      change_only: !!bool false
+      skip_internal: !!bool true
+    l99.driver.fanuc.transports.SHDR, fanuc:
+      ## shdr transform scripts
+      << : *default-shdr-transformers
+      ## model generation
+      << : *default-shdr-model-genny
+      ## device_key: used to prefix shdr key to target specific device
+      device_key: ~
+      ## device_name: used for substitution (eg. make shdr keys unique)
+      device_name: f_sim
+      net:
+        ## port: agent listening port
+        port: !!int 7878
+        ## heartbeat_ms: agent heartbeat
+        heartbeat_ms: !!int 10000
+        ## filter_duplicates: filter duplicates at adapter
+        filter_duplicates: !!bool true
+    l99.driver.fanuc.collectors.Alarms, fanuc:
+      stateful: !!bool true
+    l99.driver.fanuc.collectors.Messages, fanuc:
+      stateful: !!bool true
+    l99.driver.fanuc.collectors.Macro, fanuc:
+      map:
+        - id: test_macro
+          path: 1
+          address: !!int 100
+    l99.driver.fanuc.collectors.Pmc, fanuc:
+      map:
+        - id: test_register
+          address: R0050
+          type: word
+  
+    ##
+    ## sparkplubg example
+    ##
+  - id: f_sim_spb_long
+    enabled: !!bool false
+    type: l99.driver.fanuc.FanucMachine, fanuc
+    strategy: l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc
+    handler: l99.driver.fanuc.handlers.FanucOne, fanuc
+    transport: l99.driver.fanuc.transports.SpB, fanuc
+    l99.driver.fanuc.FanucMachine, fanuc:
+      sweep_ms: !!int 1000
+      net:
+        ip: 192.168.111.12
+        port: !!int 8193
+        timeout_s: !!int 3
+    l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc:
+      stay_connected: !!bool true
+      collectors:
+      - l99.driver.fanuc.collectors.MachineInfo, fanuc
+      - l99.driver.fanuc.collectors.Alarms, fanuc
+      - l99.driver.fanuc.collectors.Messages, fanuc
+      - l99.driver.fanuc.collectors.StateData, fanuc
+      - l99.driver.fanuc.collectors.ToolData, fanuc
+      - l99.driver.fanuc.collectors.ProductionData, fanuc
+      - l99.driver.fanuc.collectors.ProductionDataExternalSubprogramDetails, fanuc
+      - l99.driver.fanuc.collectors.GCodeData, fanuc
+      - l99.driver.fanuc.collectors.AxisData, fanuc
+      - l99.driver.fanuc.collectors.SpindleData, fanuc
+    l99.driver.fanuc.transports.SpB, fanuc:
+      overrides:
+        scada_id: ~
+        group_id: ~
+        node_id: ~
+        device_id: ~
+      net:
+        type: tcp
+        ip: 10.1.10.2
+        port: !!int 1883
+      anonymous: !!bool false
+      user: admin
+      password: password
+      reconnect_s: !!int 30
+
+    ##
+    ## influxdb example
+    ##
+  - id: f_sim_influx_long
+    enabled: !!bool false
+    type: l99.driver.fanuc.FanucMachine, fanuc
+    strategy: l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc
+    handler: l99.driver.fanuc.handlers.FanucOne, fanuc
+    transport: l99.driver.fanuc.transports.InfluxLP, fanuc
+    l99.driver.fanuc.FanucMachine, fanuc:
+      sweep_ms: !!int 1000
+      net:
+        ip: 192.168.111.12
+        port: !!int 8193
+        timeout_s: !!int 3
+    l99.driver.fanuc.strategies.FanucMultiStrategy, fanuc:
+      stay_connected: !!bool false
+      collectors:
+      - l99.driver.fanuc.collectors.MachineInfo, fanuc
+      - l99.driver.fanuc.collectors.Alarms, fanuc
+      - l99.driver.fanuc.collectors.Messages, fanuc
+      - l99.driver.fanuc.collectors.StateData, fanuc
+      - l99.driver.fanuc.collectors.ToolData, fanuc
+      - l99.driver.fanuc.collectors.ProductionData, fanuc
+      - l99.driver.fanuc.collectors.GCodeData, fanuc
+      - l99.driver.fanuc.collectors.AxisData, fanuc
+      - l99.driver.fanuc.collectors.SpindleData, fanuc
+    l99.driver.fanuc.transports.InfluxLP, fanuc:
+      <<: *default-influx-transformers
+      host: "http://influx:8086"
+      token: "dewlnpy0CmcikwWmMBlqoxcoeuUWpdlDQi8yH7QyGU0tcfn0avMMcpPWYJ-ZUmLD8iHXNl27M3GBHGC4n4_EwA=="
+      org: "fanuc"
+      bucket: "fanuc"
