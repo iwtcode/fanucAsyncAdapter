@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -30,7 +31,9 @@ type options struct {
 	progNum   int
 	lookahead bool
 	refresh   bool
+	progLog   string
 	trace     bool
+	upload    string
 }
 
 // callStats — сводка по вызовам FOCAS (флаг -trace): где уходит время.
@@ -40,11 +43,11 @@ type callStats struct {
 }
 
 type callStat struct {
-	n          int
+	n, notOK   int // notOK — вызовы с ненулевым кодом (для cnc_upload4 это «данные ещё не готовы»)
 	total, max time.Duration
 }
 
-func (s *callStats) add(fn string, _ fanuc.Code, d time.Duration) {
+func (s *callStats) add(fn string, rc fanuc.Code, d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.m[fn]
@@ -53,6 +56,9 @@ func (s *callStats) add(fn string, _ fanuc.Code, d time.Duration) {
 		s.m[fn] = st
 	}
 	st.n++
+	if rc != fanuc.CodeOK {
+		st.notOK++
+	}
 	st.total += d
 	if d > st.max {
 		st.max = d
@@ -68,10 +74,10 @@ func (s *callStats) printAndReset() {
 	}
 	sort.Slice(names, func(i, j int) bool { return s.m[names[i]].total > s.m[names[j]].total })
 	fmt.Println("\n--- вызовы FOCAS ---")
-	fmt.Printf("%-18s %6s %12s %12s %12s\n", "функция", "раз", "всего", "среднее", "макс")
+	fmt.Printf("%-18s %6s %7s %12s %12s %12s\n", "функция", "раз", "не OK", "всего", "среднее", "макс")
 	for _, n := range names {
 		st := s.m[n]
-		fmt.Printf("%-18s %6d %12v %12v %12v\n", n, st.n,
+		fmt.Printf("%-18s %6d %7d %12v %12v %12v\n", n, st.n, st.notOK,
 			st.total.Round(time.Millisecond), (st.total / time.Duration(st.n)).Round(time.Microsecond), st.max.Round(time.Millisecond))
 	}
 	s.m = make(map[string]*callStat)
@@ -92,8 +98,23 @@ func run() int {
 	flag.IntVar(&opt.progNum, "prognum", 0, "номер программы для -program (0 — главная выполняемая)")
 	flag.BoolVar(&opt.lookahead, "lookahead", false, "показывать кадры упреждающего чтения")
 	flag.BoolVar(&opt.refresh, "refresh", false, "каждый раз перечитывать программу из ЧПУ, а не из кэша")
+	flag.StringVar(&opt.progLog, "programlog", "УП.log", "файл, в который записывается текст программы (пусто — выводить в консоль)")
 	flag.BoolVar(&opt.trace, "trace", false, "показывать время каждого этапа и вызовов FOCAS")
+	flag.StringVar(&opt.upload, "upload", "auto", "способ выгрузки программы: auto | 4 (cnc_upload4) | 256 (cnc_upload)")
 	flag.Parse()
+
+	var uploadMode fanuc.UploadMode
+	switch opt.upload {
+	case "auto":
+		uploadMode = fanuc.UploadAuto
+	case "4":
+		uploadMode = fanuc.Upload4
+	case "256":
+		uploadMode = fanuc.Upload256
+	default:
+		fmt.Fprintf(os.Stderr, "неверное значение -upload %q (нужно auto, 4 или 256)\n", opt.upload)
+		return 2
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -104,6 +125,7 @@ func run() int {
 		Port:    uint16(*port),
 		Timeout: time.Duration(*timeout) * time.Second,
 		DLLPath: *dllPath,
+		UploadMode: uploadMode,
 	}
 	if opt.trace {
 		cfg.Trace = stats.add
@@ -190,8 +212,16 @@ func report(c *fanuc.Client, opt options, printedProg *int) error {
 		// В режиме опроса текст не повторяется каждую секунду — только при смене программы.
 		if *printedProg != prog.Number || opt.refresh {
 			*printedProg = prog.Number
-			fmt.Printf("\n--- Программа O%04d (%d строк, %d байт) ---\n", prog.Number, len(prog.Lines()), len(prog.Text))
-			fmt.Println(prog.Text)
+			if opt.progLog == "" {
+				fmt.Printf("\n--- Программа O%04d (%d строк, %d байт) ---\n", prog.Number, len(prog.Lines()), len(prog.Text))
+				fmt.Println(prog.Text)
+			} else {
+				if err := os.WriteFile(opt.progLog, []byte(prog.Text), 0o644); err != nil {
+					return fmt.Errorf("запись %s: %w", opt.progLog, err)
+				}
+				path, _ := filepath.Abs(opt.progLog)
+				fmt.Printf("\nПрограмма O%04d (%d строк, %d байт) записана в %s\n", prog.Number, len(prog.Lines()), len(prog.Text), path)
+			}
 		}
 	}
 	return nil

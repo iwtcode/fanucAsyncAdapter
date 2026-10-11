@@ -26,6 +26,15 @@ type Config struct {
 	// идёт по сети порциями и занимает секунды, а повторный запрос из кэша — мгновенно.
 	// Принудительно перечитать программу: Client.ReloadProgram.
 	ProgramCacheTTL time.Duration
+	// UploadMode — способ выгрузки программы (по умолчанию UploadAuto).
+	// Скорость зависит от ЧПУ/эмулятора: на разных стендах быстрее оказывается
+	// то cnc_upload4, то cnc_upload — сравните с помощью -trace.
+	UploadMode UploadMode
+	// MainNumberTTL — сколько номер главной программы, полученный из
+	// ProgramInfo или предыдущего чтения, считать актуальным: пока он свеж,
+	// Program(0) / RunningProgram не делают лишний вызов ЧПУ (0 — 2 с,
+	// отрицательное значение — каждый раз спрашивать ЧПУ).
+	MainNumberTTL time.Duration
 	// Trace, если задан, вызывается после каждого вызова функции FOCAS
 	// (имя, код возврата, длительность). Вызывается из рабочего потока —
 	// не блокируйте его.
@@ -35,6 +44,18 @@ type Config struct {
 	// чтобы такие ошибки не маскировались.
 	DisableReconnect bool
 }
+
+// UploadMode — способ выгрузки текста программы.
+type UploadMode int
+
+const (
+	// UploadAuto — cnc_upload4 (до 1280 байт), при неудаче — cnc_upload.
+	UploadAuto UploadMode = iota
+	// Upload256 — только cnc_upload (порции по 256 байт).
+	Upload256
+	// Upload4 — только cnc_upload4, без отката на cnc_upload.
+	Upload4
+)
 
 // TraceFunc — обработчик трассировки вызовов FOCAS.
 type TraceFunc func(fn string, rc Code, d time.Duration)
@@ -54,6 +75,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ProgramCacheTTL == 0 {
 		c.ProgramCacheTTL = 30 * time.Second
+	}
+	if c.MainNumberTTL == 0 {
+		c.MainNumberTTL = 2 * time.Second
 	}
 	if c.DLLPath == "" {
 		c.DLLPath = FindDLL()

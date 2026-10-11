@@ -14,14 +14,14 @@ type conn struct {
 	once   sync.Once
 }
 
-func startConn(lib *dll, cfg Config) (*conn, error) {
+func startConn(lib *dll, cfg Config, shared *sharedState) (*conn, error) {
 	w := &conn{
 		reqs:   make(chan func(*session)),
 		stop:   make(chan struct{}),
 		exited: make(chan struct{}),
 	}
 	ready := make(chan error, 1)
-	go w.loop(lib, cfg, ready)
+	go w.loop(lib, cfg, shared, ready)
 
 	if err := <-ready; err != nil {
 		<-w.exited
@@ -30,14 +30,14 @@ func startConn(lib *dll, cfg Config) (*conn, error) {
 	return w, nil
 }
 
-func (w *conn) loop(lib *dll, cfg Config, ready chan<- error) {
+func (w *conn) loop(lib *dll, cfg Config, shared *sharedState, ready chan<- error) {
 	defer close(w.exited)
 
 	// Намеренно без UnlockOSThread: когда горутина завершится, закреплённый
 	// за ней поток будет уничтожен вместе со всем, что с ним связано.
 	runtime.LockOSThread()
 
-	s := newSession(lib, cfg)
+	s := newSession(lib, cfg, shared)
 	if err := s.connect(); err != nil {
 		ready <- err
 		return

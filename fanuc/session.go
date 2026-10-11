@@ -117,11 +117,12 @@ type session struct {
 	pathBuf []byte
 	buf     *scratch
 
-	noUpload4 bool // cnc_upstart4/cnc_upload4 не работают на этом ЧПУ — не пробовать снова
+	shared *sharedState // noUpload4 и прочее, общее для всех соединений Client
 }
 
-func newSession(lib *dll, cfg Config) *session {
+func newSession(lib *dll, cfg Config, shared *sharedState) *session {
 	return &session{
+		shared: shared,
 		lib:   lib,
 		cfg:   cfg,
 		ipBuf: append([]byte(cfg.IP), 0),

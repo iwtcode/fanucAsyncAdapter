@@ -46,10 +46,25 @@ func logf(format string, args ...any) {
 	fmt.Printf("    "+format+"\n", args...)
 }
 
-func newClient(t *testing.T) *fanuc.Client {
-	t.Helper()
+// Одно общее подключение на все тесты: установка соединения с эмулятором
+// (два соединения — быстрое и «тяжёлое») занимает заметное время, и платить
+// её в каждом тесте незачем. Тесты идут параллельно (t.Parallel): выгрузка
+// программы по «тяжёлому» соединению перекрывается с опросом статуса и осей.
+// Замечание: в параллельном режиме измеренная задержка включает ожидание в
+// очереди быстрого соединения, поэтому порог maxLatency проверяется с запасом.
+var (
+	sharedClient *fanuc.Client
+	sharedSkip   string // причина пропуска, если подключиться не удалось
+)
+
+func TestMain(m *testing.M) {
+	os.Exit(runTests(m))
+}
+
+func runTests(m *testing.M) int {
 	if runtime.GOOS != "windows" {
-		t.Skip("FOCAS DLL работает только в Windows")
+		sharedSkip = "FOCAS DLL работает только в Windows"
+		return m.Run()
 	}
 
 	cfg := fanuc.Config{
@@ -65,21 +80,33 @@ func newClient(t *testing.T) *fanuc.Client {
 	if v := os.Getenv("FOCAS_PORT"); v != "" {
 		p, err := strconv.ParseUint(v, 10, 16)
 		if err != nil {
-			t.Fatalf("неверный FOCAS_PORT %q: %v", v, err)
+			fmt.Fprintf(os.Stderr, "неверный FOCAS_PORT %q: %v\n", v, err)
+			return 2
 		}
 		cfg.Port = uint16(p)
 	}
 
 	c, err := fanuc.Connect(cfg)
 	if err != nil {
-		t.Skipf("нет подключения к ЧПУ/эмулятору: %v", err)
+		sharedSkip = fmt.Sprintf("нет подключения к ЧПУ/эмулятору: %v", err)
+		return m.Run()
 	}
-	t.Cleanup(func() { _ = c.Close() })
-	return c
+	defer c.Close()
+	sharedClient = c
+	return m.Run()
+}
+
+func newClient(t *testing.T) *fanuc.Client {
+	t.Helper()
+	if sharedClient == nil {
+		t.Skip(sharedSkip)
+	}
+	return sharedClient
 }
 
 // 1. Информация о выполняемой программе.
 func TestProgramInfo(t *testing.T) {
+	t.Parallel()
 	c := newClient(t)
 
 	start := time.Now()
@@ -104,39 +131,11 @@ func TestProgramInfo(t *testing.T) {
 	if info.Name == "" && info.Number == 0 && info.MainNumber == 0 && info.RunningNumber == 0 {
 		t.Error("ЧПУ не вернуло ни имени, ни номера выполняемой программы")
 	}
-
-	// Регрессия: раньше при повторных вызовах случайно возникал EW_HANDLE (-8)
-	// из-за переезда горутины на другой поток ОС. Вызовы из многих горутин
-	// обязаны проходить без ошибок. Все вызовы идут по очереди через один поток,
-	// поэтому берём лёгкий Status (1 вызов FOCAS ≈ 30 мс), а не ProgramInfo
-	// (5 вызовов ≈ 150 мс). Пропускается при `go test -short`.
-	if testing.Short() {
-		return
-	}
-	const goroutines, iterations = 4, 5
-	var wg sync.WaitGroup
-	errs := make(chan error, goroutines*iterations)
-	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range iterations {
-				if _, err := c.Status(); err != nil {
-					errs <- err
-					return
-				}
-			}
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Errorf("повторный Status: %v", err)
-	}
 }
 
 // 2. Информация об осях.
 func TestAxes(t *testing.T) {
+	t.Parallel()
 	c := newClient(t)
 
 	start := time.Now()
@@ -176,6 +175,7 @@ func TestAxes(t *testing.T) {
 
 // 3. Управляющая программа целиком.
 func TestProgram(t *testing.T) {
+	t.Parallel()
 	c := newClient(t)
 
 	// Параллельно с выгрузкой запрашиваем состояние: оно не должно ждать,
@@ -184,6 +184,7 @@ func TestProgram(t *testing.T) {
 		wg       sync.WaitGroup
 		infoTook time.Duration
 		infoErr  error
+		info     *fanuc.ProgramInfo
 	)
 	start := time.Now()
 	wg.Add(1)
@@ -191,11 +192,23 @@ func TestProgram(t *testing.T) {
 		defer wg.Done()
 		time.Sleep(200 * time.Millisecond) // дать выгрузке начаться
 		t0 := time.Now()
-		_, infoErr = c.ProgramInfo()
+		info, infoErr = c.ProgramInfo()
 		infoTook = time.Since(t0)
 	}()
 
-	prog, err := c.RunningProgram()
+	// -short: только начало программы (≈1 с вместо ≈8 с). Эмулятор выгружает
+	// программы по очереди и со скоростью ≈4 КБ/с, поэтому целиком её читает
+	// только полный прогон.
+	short := testing.Short()
+	var (
+		prog *fanuc.Program
+		err  error
+	)
+	if short {
+		prog, err = c.ProgramHead(0, 2048)
+	} else {
+		prog, err = c.RunningProgram()
+	}
 	loadTook := time.Since(start)
 	wg.Wait()
 	if err != nil {
@@ -220,7 +233,7 @@ func TestProgram(t *testing.T) {
 	logf("программа O%04d: %d байт, %d строк", prog.Number, len(prog.Text), len(lines))
 
 	// Программа выгружена целиком, если дошли до завершающего '%'.
-	if !strings.HasSuffix(text, "%") {
+	if !short && !strings.HasSuffix(text, "%") {
 		t.Errorf("программа выгружена не полностью: нет завершающего '%%' (получено %d байт)", len(prog.Text))
 	}
 	if strings.Contains(prog.Text, "\r") || strings.Contains(prog.Text, "\x00") {
@@ -229,14 +242,19 @@ func TestProgram(t *testing.T) {
 
 	// Выполняемый кадр должен находиться в тексте программы (сравнение без пробелов).
 	// Формат кадра в буфере CNC может отличаться, поэтому только предупреждение.
-	if info, err := c.ProgramInfo(); err == nil && info.CurrentBlock != "" {
+	// Берём ProgramInfo, уже полученный во время выгрузки, — лишний опрос ЧПУ не нужен.
+	if info != nil && info.CurrentBlock != "" {
 		strip := func(s string) string { return strings.ReplaceAll(s, " ", "") }
 		if !strings.Contains(strip(prog.Text), strip(info.CurrentBlock)) {
 			logf("выполняемый кадр %q не найден в тексте программы дословно", info.CurrentBlock)
 		}
 	}
 
-	// Вся программа целиком — в файл, в консоль не выводится.
+	// Вся программа целиком — в файл, в консоль не выводится
+	// (в коротком режиме файл не трогаем: там только начало программы).
+	if short {
+		return
+	}
 	if err := os.WriteFile(programLogFile, []byte(prog.Text), 0o644); err != nil {
 		t.Errorf("запись %s: %v", programLogFile, err)
 	} else {

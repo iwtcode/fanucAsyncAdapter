@@ -2,6 +2,7 @@ package fanuc
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,36 @@ type Client struct {
 
 	cacheMu sync.Mutex
 	cache   map[int]cachedProgram
+
+	// Номер главной программы, уже полученный быстрым соединением
+	// (ProgramInfo / предыдущий RunningProgram): повторно cnc_rdprgnum не зовём.
+	numMu sync.Mutex
+	num   mainNumber
+
+	// Выгрузки, идущие прямо сейчас: параллельные запросы одной программы
+	// ждут одну выгрузку, даже если кэш выключен (ProgramCacheTTL < 0).
+	flightMu sync.Mutex
+	flight   map[int]*flightCall
+
+	shared *sharedState
+}
+
+// sharedState — то, что общее для всех соединений одного Client.
+type sharedState struct {
+	// cnc_upload4 не работает на этом ЧПУ. Флаг общий: иначе каждое новое
+	// соединение заново тратило бы до probeIdle (3 с) на «разведку».
+	noUpload4 atomic.Bool
+}
+
+type mainNumber struct {
+	n  int
+	at time.Time
+}
+
+type flightCall struct {
+	done chan struct{}
+	prog *Program
+	err  error
 }
 
 type cachedProgram struct {
@@ -41,11 +72,38 @@ func Connect(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	fast, err := startConn(lib, cfg)
+	shared := &sharedState{}
+
+	// «Тяжёлое» соединение открываем параллельно с основным: его установка
+	// не попадает на критический путь первой выгрузки программы.
+	type bulkRes struct {
+		c   *conn
+		err error
+	}
+	bulkCh := make(chan bulkRes, 1)
+	go func() {
+		c, err := startConn(lib, cfg, shared)
+		bulkCh <- bulkRes{c, err}
+	}()
+
+	fast, err := startConn(lib, cfg, shared)
+	br := <-bulkCh
 	if err != nil {
+		if br.c != nil {
+			br.c.close()
+		}
 		return nil, err
 	}
-	return &Client{cfg: cfg, lib: lib, fast: fast, cache: make(map[int]cachedProgram)}, nil
+	c := &Client{
+		cfg: cfg, lib: lib, fast: fast, shared: shared,
+		cache:     make(map[int]cachedProgram),
+		flight:    make(map[int]*flightCall),
+		bulkTried: true,
+	}
+	if br.err == nil {
+		c.bulk = br.c // иначе выгрузка пойдёт по основному соединению
+	}
+	return c, nil
 }
 
 // Config возвращает действующие параметры (с подставленными значениями по умолчанию).
@@ -75,7 +133,7 @@ func (c *Client) bulkConn() *conn {
 	}
 	if c.bulk == nil && !c.bulkTried {
 		c.bulkTried = true
-		if w, err := startConn(c.lib, c.cfg); err == nil {
+		if w, err := startConn(c.lib, c.cfg, c.shared); err == nil {
 			c.bulk = w
 		}
 	}
@@ -93,7 +151,44 @@ func (c *Client) Status() (Status, error) {
 // ProgramInfo возвращает информацию о выполняемой программе: имя, номера,
 // номер кадра N, выполняемый кадр и состояние станка.
 func (c *Client) ProgramInfo() (*ProgramInfo, error) {
-	return queryOn(c.fast, (*session).programInfo)
+	info, err := queryOn(c.fast, (*session).programInfo)
+	if err == nil {
+		if n := mainNumberOf(info); n > 0 {
+			c.setMainNumber(n)
+		}
+	}
+	return info, err
+}
+
+// mainNumberOf — тот же приоритет, что в currentMainProgram: главная, затем выполняемая.
+func mainNumberOf(info *ProgramInfo) int {
+	switch {
+	case info.MainNumber > 0:
+		return info.MainNumber
+	case info.RunningNumber > 0:
+		return info.RunningNumber
+	default:
+		return info.Number
+	}
+}
+
+func (c *Client) setMainNumber(n int) {
+	c.numMu.Lock()
+	c.num = mainNumber{n: n, at: time.Now()}
+	c.numMu.Unlock()
+}
+
+func (c *Client) freshMainNumber() (int, bool) {
+	ttl := c.cfg.MainNumberTTL
+	if ttl < 0 {
+		return 0, false
+	}
+	c.numMu.Lock()
+	defer c.numMu.Unlock()
+	if c.num.n > 0 && time.Since(c.num.at) <= ttl {
+		return c.num.n, true
+	}
+	return 0, false
 }
 
 // Axes возвращает позиции осей: абсолютные, машинные, относительные и остаток пути.
@@ -120,35 +215,91 @@ func (c *Client) ReloadProgram(number int) (*Program, error) {
 	return c.loadProgram(number, true)
 }
 
+// resolveNumber определяет номер программы: number > 0 возвращается как есть,
+// иначе берётся свежий номер главной программы или спрашивается ЧПУ.
+func (c *Client) resolveNumber(number int) (int, error) {
+	if number > 0 {
+		return number, nil
+	}
+	if n, ok := c.freshMainNumber(); ok {
+		return n, nil // уже знаем номер — лишний вызов ЧПУ не нужен
+	}
+	// Номер определяем по быстрому соединению — оно не занято выгрузкой.
+	n, err := queryOn(c.fast, (*session).currentMainProgram)
+	if err != nil {
+		return 0, err
+	}
+	c.setMainNumber(n)
+	return n, nil
+}
+
+// ProgramHead выгружает только начало программы: не меньше maxBytes байт
+// (или всю программу, если она короче). Текст обрезается по границе порции
+// и не кэшируется. Нужен для быстрых проверок: выгрузка целиком идёт секунды,
+// а ЧПУ/эмулятор обслуживает выгрузки строго по очереди.
+// number <= 0 — главная выполняемая программа.
+func (c *Client) ProgramHead(number, maxBytes int) (*Program, error) {
+	number, err := c.resolveNumber(number)
+	if err != nil {
+		return nil, err
+	}
+	return queryOn(c.bulkConn(), func(s *session) (*Program, error) {
+		return s.programLimit(number, maxBytes)
+	})
+}
+
 func (c *Client) loadProgram(number int, force bool) (*Program, error) {
-	if number <= 0 {
-		// Номер определяем по быстрому соединению — оно не занято выгрузкой.
-		n, err := queryOn(c.fast, (*session).currentMainProgram)
-		if err != nil {
-			return nil, err
-		}
-		number = n
+	number, err := c.resolveNumber(number)
+	if err != nil {
+		return nil, err
 	}
 	if !force {
 		if p, ok := c.cached(number); ok {
 			return p, nil
 		}
 	}
-	return queryOn(c.bulkConn(), func(s *session) (*Program, error) {
-		// Пока запрос стоял в очереди, другой мог уже загрузить эту программу.
-		if !force {
-			if p, ok := c.cached(number); ok {
-				return p, nil
-			}
+
+	// Одна выгрузка на программу: остальные желающие ждут её результат.
+	c.flightMu.Lock()
+	if f, ok := c.flight[number]; ok {
+		c.flightMu.Unlock()
+		<-f.done
+		if f.err != nil {
+			return nil, f.err
 		}
+		cp := *f.prog
+		return &cp, nil
+	}
+	// Предыдущая выгрузка могла завершиться между проверкой кэша и этим местом.
+	if !force {
+		if p, ok := c.cached(number); ok {
+			c.flightMu.Unlock()
+			return p, nil
+		}
+	}
+	f := &flightCall{done: make(chan struct{})}
+	c.flight[number] = f
+	c.flightMu.Unlock()
+
+	f.prog, f.err = queryOn(c.bulkConn(), func(s *session) (*Program, error) {
 		p, err := s.program(number)
 		if err != nil {
 			return nil, err
 		}
 		c.store(p)
-		cp := *p
-		return &cp, nil
+		return p, nil
 	})
+
+	c.flightMu.Lock()
+	delete(c.flight, number)
+	c.flightMu.Unlock()
+	close(f.done)
+
+	if f.err != nil {
+		return nil, f.err
+	}
+	cp := *f.prog
+	return &cp, nil
 }
 
 func (c *Client) cached(number int) (*Program, bool) {

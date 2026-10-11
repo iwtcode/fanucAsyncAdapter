@@ -1,6 +1,7 @@
 *.test
 *.log
 *.out
+*.exe
 coverage.*
 *.coverprofile
 profile.cov
