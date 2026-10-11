@@ -8,7 +8,6 @@ profile.cov
 go.work
 go.work.sum
 .idea/
-.vscode/
 *.txt
 *.py
 *.zip
